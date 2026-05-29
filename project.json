@@ -1,0 +1,100 @@
+{
+  "description": "A Wallpaper Engine web wallpaper that reacts to Windows media sessions, showing current music album art, track metadata, timeline and audio visualizers. Built for NetEase Cloud Music when it exposes media information to Windows.",
+  "file": "index.html",
+  "general": {
+    "supportsaudioprocessing": true,
+    "properties": {
+      "schemecolor": {
+        "order": 0,
+        "text": "Accent color fallback",
+        "type": "color",
+        "value": "0.839 0.306 0.282"
+      },
+      "visualstyle": {
+        "order": 1,
+        "text": "Visualizer style",
+        "type": "combo",
+        "value": "ringbars",
+        "options": [
+          {
+            "label": "Ring + bars",
+            "value": "ringbars"
+          },
+          {
+            "label": "Ring only",
+            "value": "ring"
+          },
+          {
+            "label": "Bars only",
+            "value": "bars"
+          }
+        ]
+      },
+      "visualintensity": {
+        "fraction": true,
+        "max": 1.8,
+        "min": 0.4,
+        "order": 2,
+        "precision": 2,
+        "text": "Visualizer intensity",
+        "type": "slider",
+        "value": 1
+      },
+      "brightness": {
+        "fraction": true,
+        "max": 1.8,
+        "min": 0.75,
+        "order": 3,
+        "precision": 2,
+        "text": "Brightness",
+        "type": "slider",
+        "value": 1.28
+      },
+      "coverroundness": {
+        "fraction": false,
+        "max": 80,
+        "min": 0,
+        "order": 4,
+        "text": "Album corner radius",
+        "type": "slider",
+        "value": 28
+      },
+      "layoutmode": {
+        "order": 5,
+        "text": "Layout mode",
+        "type": "combo",
+        "value": "wide",
+        "options": [
+          {
+            "label": "Wide",
+            "value": "wide"
+          },
+          {
+            "label": "Compact",
+            "value": "compact"
+          }
+        ]
+      },
+      "showclock": {
+        "order": 6,
+        "text": "Show clock",
+        "type": "bool",
+        "value": true
+      },
+      "showtimeline": {
+        "order": 7,
+        "text": "Show timeline",
+        "type": "bool",
+        "value": true
+      }
+    }
+  },
+  "preview": "preview.png",
+  "supportsaudioprocessing": true,
+  "tags": [
+    "Music"
+  ],
+  "title": "NetEase Music Reactive",
+  "type": "web",
+  "visibility": "private"
+}

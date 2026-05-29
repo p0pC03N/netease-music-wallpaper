@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Netease Music Reactive Wallpaper</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <canvas id="visualizer" aria-hidden="true"></canvas>
+
+    <div class="backdrop" aria-hidden="true">
+      <img id="backdropCoverA" class="backdrop-cover is-active" alt="">
+      <img id="backdropCoverB" class="backdrop-cover" alt="">
+      <div class="wash"></div>
+    </div>
+
+    <main class="stage" id="stage">
+      <section class="player" aria-label="当前播放">
+        <div class="cover-wrap">
+          <canvas id="ring" aria-hidden="true"></canvas>
+          <div class="cover-shell">
+            <img id="cover" alt="">
+            <div id="emptyCover" class="empty-cover">
+              <span class="note-head"></span>
+              <span class="note-stem"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="meta">
+          <div class="meta-top">
+            <p id="status" class="status">等待媒体信息</p>
+            <div id="clock" class="clock" aria-label="当前时间">
+              <span id="clockTime">--:--</span>
+              <span id="clockDate">----.--.--</span>
+            </div>
+          </div>
+          <h1 id="title">等待网易云音乐</h1>
+          <p id="artist">播放歌曲后读取 Windows 媒体会话</p>
+          <div id="album" class="album">专辑封面和频谱会随播放更新</div>
+          <div class="diagnostics" aria-hidden="true">
+            <span id="mediaProbe">桥接: 等待</span>
+            <span id="audioProbe">音频: 等待</span>
+          </div>
+
+          <div id="timeline" class="timeline" aria-hidden="true">
+            <div class="track">
+              <div id="progress" class="progress"></div>
+            </div>
+            <div class="time">
+              <span id="position">0:00</span>
+              <span id="duration">0:00</span>
+            </div>
+          </div>
+        </div>
+        <aside id="playlistPanel" class="playlist-panel" aria-label="当前播放列表">
+          <button id="playlistToggle" class="playlist-toggle" type="button" aria-label="展开播放列表">
+            <span></span>
+          </button>
+          <div class="playlist-content">
+            <div class="playlist-title">当前歌单</div>
+            <div id="playlistItems" class="playlist-items"></div>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="wallpaper.js"></script>
+  </body>
+</html>

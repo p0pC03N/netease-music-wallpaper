@@ -1,0 +1,15 @@
+runtime/
+*.log
+*.pid
+*.tmp
+*.bak
+*.cache
+*.local
+
+bridge/*.log
+bridge/*.pid
+
+node_modules/
+.DS_Store
+Thumbs.db
+desktop.ini
