@@ -102,17 +102,41 @@ function normalizeThumbnail(src) {
   if (!src) {
     return "";
   }
-  if (src.startsWith("data:") || src.startsWith("file:") || src.startsWith("http") || src.startsWith("runtime/") || src.startsWith("./") || src.startsWith("../")) {
-    return src;
+  const value = String(src).trim();
+  if (value.startsWith("data:image/") || value.startsWith("blob:") || value.startsWith("runtime/")) {
+    return value;
   }
-  return `data:image/png;base64,${src}`;
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const url = new URL(value);
+      return url.href;
+    } catch {
+      return "";
+    }
+  }
+  return `data:image/png;base64,${value}`;
 }
 
 function isBridgeFresh() {
   return Boolean(state.bridgeSongId && state.bridgeUpdatedAt && Date.now() - state.bridgeUpdatedAt < 12000);
 }
 
-function setCover(src) {
+function clearCover() {
+  state.coverSrc = "";
+  state.pendingCoverSrc = "";
+  state.displayedCoverSrc = "";
+  state.coverPaletteToken += 1;
+  state.coverPaletteSrc = "";
+  state.hasCover = false;
+  els.body.classList.remove("has-cover");
+  els.cover.removeAttribute("src");
+  els.backdropCovers.forEach((node) => {
+    node.classList.remove("is-active");
+    node.removeAttribute("src");
+  });
+}
+
+function setCover(src, options = {}) {
   const imageSrc = normalizeThumbnail(src);
   if (imageSrc) {
     if (state.coverSrc === imageSrc || state.pendingCoverSrc === imageSrc) {
@@ -151,20 +175,10 @@ function setCover(src) {
       preload.onload();
     }
   } else {
-    if (state.displayedCoverSrc) {
+    if (state.displayedCoverSrc && !options.forceClear) {
       return;
     }
-    state.coverSrc = "";
-    state.pendingCoverSrc = "";
-    state.coverPaletteToken += 1;
-    state.coverPaletteSrc = "";
-    state.hasCover = false;
-    els.body.classList.remove("has-cover");
-    els.cover.removeAttribute("src");
-    els.backdropCovers.forEach((node) => {
-      node.classList.remove("is-active");
-      node.removeAttribute("src");
-    });
+    clearCover();
   }
 }
 
@@ -190,16 +204,36 @@ function swapBackdropCover(imageSrc) {
 }
 
 function applyBridgePayload(payload) {
-  if (!payload || !payload.id) {
+  if (!payload) {
     return;
   }
   const updatedAt = Number(payload.updatedAt) || Date.now();
-  if (updatedAt <= state.bridgeUpdatedAt && String(payload.id) === state.bridgeSongId) {
+  const nextSongId = payload.id ? String(payload.id) : "";
+  if (updatedAt <= state.bridgeUpdatedAt && nextSongId === state.bridgeSongId) {
+    return;
+  }
+
+  if (!nextSongId) {
+    state.bridgeUpdatedAt = updatedAt;
+    state.bridgeLastSeenAt = Date.now();
+    state.bridgeSongId = "";
+    state.playback = payload.playback || "waiting";
+    state.title = "";
+    state.artist = "";
+    state.albumTitle = "";
+    state.position = 0;
+    state.duration = 0;
+    state.hasTimeline = false;
+    state.playlist = [];
+    clearCover();
+    updateMediaText();
+    updatePlaybackClass();
+    updateTimeline();
+    renderPlaylist();
     return;
   }
 
   const previousSongId = state.bridgeSongId;
-  const nextSongId = String(payload.id);
   state.bridgeUpdatedAt = updatedAt;
   state.bridgeLastSeenAt = Date.now();
   state.bridgeSongId = nextSongId;
@@ -971,14 +1005,6 @@ window.addEventListener("pointerdown", (event) => {
 if (els.playlistPanel) {
   els.playlistPanel.addEventListener("pointerdown", (event) => {
     event.stopPropagation();
-  });
-}
-
-if (els.playlistToggle) {
-  els.playlistToggle.addEventListener("click", () => {
-    state.sidebarOpen = !state.sidebarOpen;
-    els.playlistPanel.classList.toggle("is-open", state.sidebarOpen);
-    els.playlistToggle.setAttribute("aria-label", state.sidebarOpen ? "收起播放列表" : "展开播放列表");
   });
 }
 

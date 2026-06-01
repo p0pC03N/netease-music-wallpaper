@@ -49,6 +49,7 @@ watchdog 会保持以下组件在后台运行：
 
 - `netease-runtime-server.js`：本地 HTTP 服务，默认 `http://127.0.0.1:39487`
 - `netease-bridge.ps1`：读取网易云音乐当前播放状态
+- `ensure-netease-cdp.ps1`：只允许本机 CDP origin，避免默认开放 `--remote-allow-origins=*`
 - Wallpaper Engine 配置修复：避免锁屏/系统壁纸覆盖重新开启导致闪屏
 - `project.json` 音频配置修复：避免编辑器保存后丢失音频处理开关
 

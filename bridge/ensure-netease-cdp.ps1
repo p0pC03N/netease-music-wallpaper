@@ -1,6 +1,7 @@
 param(
   [string]$NeteaseExe = "D:\CloudMusic\cloudmusic.exe",
   [int]$Port = 9222,
+  [string]$RemoteAllowOrigins = "",
   [switch]$RestartIfNeeded
 )
 
@@ -10,6 +11,10 @@ $ErrorActionPreference = "Stop"
 $RuntimeDir = Join-Path $env:LOCALAPPDATA "NeteaseMusicWallpaper\runtime"
 $LogPath = Join-Path $RuntimeDir "netease-cdp-launch.log"
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+
+if (-not $RemoteAllowOrigins) {
+  $RemoteAllowOrigins = "http://127.0.0.1:$Port"
+}
 
 function Write-LaunchLog {
   param([string]$Message)
@@ -26,6 +31,27 @@ function Test-CdpPort {
   }
 }
 
+function Resolve-NeteaseExecutable {
+  param([string]$PreferredPath)
+
+  $candidates = @(
+    $PreferredPath,
+    "D:\CloudMusic\cloudmusic.exe",
+    (Join-Path $env:LOCALAPPDATA "Programs\NetEase\CloudMusic\cloudmusic.exe"),
+    (Join-Path $env:LOCALAPPDATA "NetEase\CloudMusic\cloudmusic.exe"),
+    (Join-Path $env:ProgramFiles "NetEase\CloudMusic\cloudmusic.exe"),
+    (Join-Path ${env:ProgramFiles(x86)} "NetEase\CloudMusic\cloudmusic.exe")
+  ) | Where-Object { $_ } | Select-Object -Unique
+
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) {
+      return $candidate
+    }
+  }
+
+  return $PreferredPath
+}
+
 function Get-MainCloudMusicProcesses {
   return @(Get-CimInstance Win32_Process -Filter "Name = 'cloudmusic.exe'" -ErrorAction SilentlyContinue | Where-Object {
     $_.CommandLine -notmatch '--type='
@@ -37,6 +63,7 @@ if (Test-CdpPort) {
   exit 0
 }
 
+$NeteaseExe = Resolve-NeteaseExecutable -PreferredPath $NeteaseExe
 if (-not (Test-Path -LiteralPath $NeteaseExe)) {
   Write-LaunchLog "NetEase executable not found: $NeteaseExe"
   exit 1
@@ -63,7 +90,11 @@ if ($runningCloudMusic.Count -gt 0) {
   Write-LaunchLog "Starting NetEase with CDP port $Port."
 }
 
-Start-Process -FilePath $NeteaseExe -ArgumentList @("--remote-debugging-port=$Port", "--remote-allow-origins=*") -WindowStyle Hidden
+$launchArgs = @("--remote-debugging-port=$Port")
+if ($RemoteAllowOrigins) {
+  $launchArgs += "--remote-allow-origins=$RemoteAllowOrigins"
+}
+Start-Process -FilePath $NeteaseExe -ArgumentList $launchArgs -WindowStyle Hidden
 Start-Sleep -Seconds 4
 
 if (Test-CdpPort) {

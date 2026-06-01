@@ -73,8 +73,8 @@ function Write-Heartbeat {
   $json = Convert-ToSafeJson $payload
   foreach ($dir in $script:MirrorRuntimeDirs) {
     try {
-      [System.IO.File]::WriteAllText((Join-Path $dir "bridge-heartbeat.json"), $json, [System.Text.UTF8Encoding]::new($false))
-      [System.IO.File]::WriteAllText((Join-Path $dir "bridge.pid"), [string]$PID, [System.Text.UTF8Encoding]::new($false))
+      Write-Utf8FileAtomic -Path (Join-Path $dir "bridge-heartbeat.json") -Text $json
+      Write-Utf8FileAtomic -Path (Join-Path $dir "bridge.pid") -Text ([string]$PID)
     } catch {}
   }
 }
@@ -117,6 +117,27 @@ function Convert-ToSafeJson {
   return ($Value | ConvertTo-Json -Depth 12 -Compress)
 }
 
+function Write-Utf8FileAtomic {
+  param(
+    [Parameter(Mandatory=$true)][string]$Path,
+    [Parameter(Mandatory=$true)][string]$Text
+  )
+
+  $dir = Split-Path -Parent $Path
+  New-Item -ItemType Directory -Force -Path $dir | Out-Null
+  $temp = Join-Path $dir (".{0}.{1}.tmp" -f ([IO.Path]::GetFileName($Path)), ([guid]::NewGuid().ToString("N")))
+  try {
+    [System.IO.File]::WriteAllText($temp, $Text, [System.Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $Path) {
+      [System.IO.File]::Replace($temp, $Path, $null)
+    } else {
+      [System.IO.File]::Move($temp, $Path)
+    }
+  } finally {
+    Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+  }
+}
+
 Initialize-MirrorRuntimeDirs
 Initialize-SingleInstance
 Write-StateLog "started from $ProjectRoot"
@@ -132,8 +153,8 @@ window.dispatchEvent(new CustomEvent("netease-now-playing", { detail: window.__N
 "@
   foreach ($dir in $script:MirrorRuntimeDirs) {
     try {
-      [System.IO.File]::WriteAllText((Join-Path $dir "now-playing.json"), $json, [System.Text.UTF8Encoding]::new($false))
-      [System.IO.File]::WriteAllText((Join-Path $dir "now-playing.js"), $js, [System.Text.UTF8Encoding]::new($false))
+      Write-Utf8FileAtomic -Path (Join-Path $dir "now-playing.json") -Text $json
+      Write-Utf8FileAtomic -Path (Join-Path $dir "now-playing.js") -Text $js
     } catch {}
   }
 }
