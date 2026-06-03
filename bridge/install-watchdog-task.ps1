@@ -1,6 +1,7 @@
 param(
   [string]$TaskName = "Netease Music Wallpaper Bridge Watchdog",
-  [int]$StartupDelaySeconds = 20
+  [int]$StartupDelaySeconds = 20,
+  [int]$RecoveryIntervalMinutes = 5
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +20,16 @@ $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 if ($StartupDelaySeconds -gt 0) {
   $trigger.Delay = "PT${StartupDelaySeconds}S"
 }
+$triggers = @($trigger)
+
+if ($RecoveryIntervalMinutes -gt 0) {
+  $recoveryTrigger = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes $RecoveryIntervalMinutes) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
+  $triggers += $recoveryTrigger
+}
 
 $settings = New-ScheduledTaskSettingsSet `
   -AllowStartIfOnBatteries `
@@ -33,7 +44,7 @@ $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interac
 Register-ScheduledTask `
   -TaskName $TaskName `
   -Action $action `
-  -Trigger $trigger `
+  -Trigger $triggers `
   -Settings $settings `
   -Principal $principal `
   -Description "Keeps the NetEase Music reactive wallpaper bridge running after login and restarts it if it fails." `
