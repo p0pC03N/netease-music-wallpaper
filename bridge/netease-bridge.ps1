@@ -126,15 +126,17 @@ function Write-Utf8FileAtomic {
   $dir = Split-Path -Parent $Path
   New-Item -ItemType Directory -Force -Path $dir | Out-Null
   $temp = Join-Path $dir (".{0}.{1}.tmp" -f ([IO.Path]::GetFileName($Path)), ([guid]::NewGuid().ToString("N")))
+  $backup = Join-Path $dir (".{0}.{1}.bak" -f ([IO.Path]::GetFileName($Path)), ([guid]::NewGuid().ToString("N")))
   try {
     [System.IO.File]::WriteAllText($temp, $Text, [System.Text.UTF8Encoding]::new($false))
     if (Test-Path -LiteralPath $Path) {
-      [System.IO.File]::Replace($temp, $Path, $null)
+      [System.IO.File]::Replace($temp, $Path, $backup)
     } else {
       [System.IO.File]::Move($temp, $Path)
     }
   } finally {
     Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
   }
 }
 
