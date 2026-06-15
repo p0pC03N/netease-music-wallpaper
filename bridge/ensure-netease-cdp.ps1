@@ -2,6 +2,7 @@ param(
   [string]$NeteaseExe = "D:\CloudMusic\cloudmusic.exe",
   [int]$Port = 9222,
   [string]$RemoteAllowOrigins = "",
+  [int]$StartupWaitSeconds = 15,
   [switch]$RestartIfNeeded
 )
 
@@ -95,12 +96,14 @@ if ($RemoteAllowOrigins) {
   $launchArgs += "--remote-allow-origins=$RemoteAllowOrigins"
 }
 Start-Process -FilePath $NeteaseExe -ArgumentList $launchArgs -WindowStyle Hidden
-Start-Sleep -Seconds 4
 
-if (Test-CdpPort) {
-  Write-LaunchLog "CDP is available on port $Port."
-  exit 0
+for ($attempt = 0; $attempt -lt $StartupWaitSeconds; $attempt++) {
+  Start-Sleep -Seconds 1
+  if (Test-CdpPort) {
+    Write-LaunchLog "CDP is available on port $Port."
+    exit 0
+  }
 }
 
-Write-LaunchLog "Started NetEase, but CDP port $Port is still unavailable."
+Write-LaunchLog "Started NetEase, but CDP port $Port is still unavailable after $StartupWaitSeconds seconds."
 exit 3

@@ -1,5 +1,6 @@
 param(
   [int]$IntervalSeconds = 3,
+  [int]$ReliableHoldSeconds = 90,
   [switch]$Once
 )
 
@@ -9,26 +10,16 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $RuntimeDir = Join-Path $env:LOCALAPPDATA "NeteaseMusicWallpaper\runtime"
 $RuntimeServerUrl = "http://127.0.0.1:39487"
-$NowPlayingJs = Join-Path $RuntimeDir "now-playing.js"
 $NowPlayingJson = Join-Path $RuntimeDir "now-playing.json"
 $CoverPath = Join-Path $RuntimeDir "cover.jpg"
-$HeartbeatPath = Join-Path $RuntimeDir "bridge-heartbeat.json"
-$StateLogPath = Join-Path $RuntimeDir "bridge-state.log"
-$PidPath = Join-Path $RuntimeDir "bridge.pid"
-$NeteaseRoot = Join-Path $env:LOCALAPPDATA "NetEase\CloudMusic"
-$PlayingListPath = Join-Path $NeteaseRoot "webdata\file\playingList"
-$CacheDir = Join-Path $NeteaseRoot "Cache\Cache"
-$WebDbPath = Join-Path $NeteaseRoot "Library\webdb.dat"
-$Sqlite = Get-Command sqlite3 -ErrorAction SilentlyContinue
 $Node = Get-Command node -ErrorAction SilentlyContinue
 $CdpHelper = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "netease-cdp-now-playing.js"
 $script:LastCoverSongId = ""
 $script:LastCoverRef = ""
 $script:LastLoggedSongId = ""
 $script:LastAcceptedPayload = $null
-$script:PendingWeakSongId = ""
-$script:PendingWeakSource = ""
-$script:PendingWeakCount = 0
+$script:LastReliableAt = [DateTimeOffset]::MinValue
+$script:PayloadSequence = 0
 $script:MirrorRuntimeDirs = @()
 $script:BridgeMutex = $null
 $script:HasBridgeMutex = $false
@@ -39,6 +30,15 @@ function Initialize-MirrorRuntimeDirs {
   $dirs = New-Object System.Collections.Generic.List[string]
   $dirs.Add($RuntimeDir)
   $script:MirrorRuntimeDirs = @($dirs | Select-Object -Unique)
+}
+
+function Remove-StaleRuntimeFiles {
+  $patterns = @("webdb-*.dat", "cover-*.jpg", ".*.tmp", ".*.bak")
+  foreach ($pattern in $patterns) {
+    Get-ChildItem -LiteralPath $RuntimeDir -Filter $pattern -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.LastWriteTime -lt (Get-Date).AddMinutes(-2) } |
+      Remove-Item -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function Write-StateLog {
@@ -96,6 +96,7 @@ function Initialize-SingleInstance {
 function Write-EmptyPayload {
   param([string]$Reason)
 
+  $script:PayloadSequence += 1
   $payload = [ordered]@{
     id = ""
     title = ""
@@ -105,7 +106,10 @@ function Write-EmptyPayload {
     durationSeconds = 0
     playback = "waiting"
     source = "netease-bridge"
+    confidence = "none"
+    degraded = $true
     reason = $Reason
+    sequence = $script:PayloadSequence
     updatedAt = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
   }
   Write-Payload -Payload $payload
@@ -141,6 +145,7 @@ function Write-Utf8FileAtomic {
 }
 
 Initialize-MirrorRuntimeDirs
+Remove-StaleRuntimeFiles
 Initialize-SingleInstance
 Write-StateLog "started from $ProjectRoot"
 Write-Heartbeat -Status "starting" -Message "Bridge process started."
@@ -161,6 +166,44 @@ window.dispatchEvent(new CustomEvent("netease-now-playing", { detail: window.__N
   }
 }
 
+function Set-PayloadProperty {
+  param(
+    $Payload,
+    [string]$Name,
+    $Value
+  )
+
+  if ($Payload.PSObject.Properties[$Name]) {
+    $Payload.$Name = $Value
+  } else {
+    $Payload | Add-Member -NotePropertyName $Name -NotePropertyValue $Value
+  }
+}
+
+function Initialize-LastReliablePayload {
+  if (-not (Test-Path -LiteralPath $NowPlayingJson)) {
+    return
+  }
+
+  try {
+    $payload = Get-Content -LiteralPath $NowPlayingJson -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($payload.sequence) {
+      $script:PayloadSequence = [int64]$payload.sequence
+    }
+    if ($payload.id -and $payload.source -eq "netease-cdp") {
+      $reliableAtMs = if ($payload.reliableAt) { [int64]$payload.reliableAt } else { [int64]$payload.updatedAt }
+      $reliableAt = [DateTimeOffset]::FromUnixTimeMilliseconds($reliableAtMs)
+      if (([DateTimeOffset]::Now - $reliableAt).TotalSeconds -le $ReliableHoldSeconds) {
+        $script:LastAcceptedPayload = $payload
+        $script:LastReliableAt = $reliableAt
+        Write-StateLog ("restored reliable payload id={0} ageSeconds={1:n0}" -f $payload.id, ([DateTimeOffset]::Now - $reliableAt).TotalSeconds)
+      }
+    }
+  } catch {
+    Write-StateLog ("failed to restore reliable payload: {0}" -f $_.Exception.Message)
+  }
+}
+
 function Sync-CoverToMirrors {
   foreach ($dir in $script:MirrorRuntimeDirs) {
     if ($dir -eq $RuntimeDir) {
@@ -169,242 +212,6 @@ function Sync-CoverToMirrors {
     try {
       Copy-Item -LiteralPath $CoverPath -Destination (Join-Path $dir "cover.jpg") -Force -ErrorAction Stop
     } catch {}
-  }
-}
-
-function Convert-TrackToSong {
-  param($Track)
-
-  $artists = @()
-  if ($Track.artists) {
-    $artists = $Track.artists
-  } elseif ($Track.ar) {
-    $artists = $Track.ar
-  }
-
-  $album = $Track.album
-  if (-not $album -and $Track.al) {
-    $album = $Track.al
-  }
-
-  $title = [string]$Track.name
-  if (-not $title) {
-    $title = [string]$Track.mainTitle
-  }
-
-  $albumName = ""
-  $coverUrl = ""
-  if ($album) {
-    $albumName = [string]$album.name
-    if (-not $albumName) {
-      $albumName = [string]$album.albumName
-    }
-    $coverUrl = [string]$album.picUrl
-    if (-not $coverUrl) {
-      $coverUrl = [string]$album.cover
-    }
-    if (-not $coverUrl) {
-      $coverUrl = [string]$album.blurPicUrl
-    }
-  }
-
-  $duration = 0
-  if ($Track.duration) {
-    $duration = [double]$Track.duration
-  } elseif ($Track.dt) {
-    $duration = [double]$Track.dt
-  }
-
-  return [ordered]@{
-    id = [string]$Track.id
-    title = $title
-    artist = [string](($artists | ForEach-Object { $_.name }) -join ", ")
-    album = $albumName
-    coverUrl = $coverUrl
-    durationSeconds = [math]::Round($duration / 1000, 3)
-  }
-}
-
-function Copy-LockedFile {
-  param(
-    [Parameter(Mandatory=$true)][string]$Source,
-    [Parameter(Mandatory=$true)][string]$Destination
-  )
-
-  $inputStream = [System.IO.File]::Open($Source, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-  try {
-    $outputStream = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-    try {
-      $inputStream.CopyTo($outputStream)
-    } finally {
-      $outputStream.Dispose()
-    }
-  } finally {
-    $inputStream.Dispose()
-  }
-}
-
-function Invoke-WebDbQuery {
-  param([string]$Query)
-
-  if (-not $Sqlite -or -not (Test-Path -LiteralPath $WebDbPath)) {
-    return $null
-  }
-
-  $tempDb = Join-Path $RuntimeDir ("webdb-{0}.dat" -f ([guid]::NewGuid().ToString("N")))
-  try {
-    Copy-LockedFile -Source $WebDbPath -Destination $tempDb
-    $output = & $Sqlite.Source -json $tempDb $Query 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $output) {
-      return $null
-    }
-    $json = ($output -join "`n").Trim()
-    if (-not $json) {
-      return $null
-    }
-    return $json | ConvertFrom-Json
-  } catch {
-    return $null
-  } finally {
-    Remove-Item -LiteralPath $tempDb -Force -ErrorAction SilentlyContinue
-  }
-}
-
-function Convert-WebDbRowToSong {
-  param($Row)
-
-  if (-not $Row -or -not $Row.jsonStr) {
-    return $null
-  }
-
-  try {
-    $track = $Row.jsonStr | ConvertFrom-Json
-    $song = Convert-TrackToSong -Track $track
-    $song.playtime = $Row.playtime
-    return $song
-  } catch {
-    return $null
-  }
-}
-
-function Invoke-Utf8Json {
-  param([string]$Url)
-
-  $request = [System.Net.HttpWebRequest]::Create($Url)
-  $request.Method = "GET"
-  $request.Timeout = 15000
-  $request.ReadWriteTimeout = 15000
-  $request.UserAgent = "Mozilla/5.0"
-  $request.Referer = "https://music.163.com/"
-
-  $webResponse = $request.GetResponse()
-  try {
-    $stream = $webResponse.GetResponseStream()
-    try {
-      $memory = New-Object System.IO.MemoryStream
-      try {
-        $stream.CopyTo($memory)
-        $text = [System.Text.Encoding]::UTF8.GetString($memory.ToArray())
-      } finally {
-        $memory.Dispose()
-      }
-    } finally {
-      $stream.Dispose()
-    }
-  } finally {
-    $webResponse.Dispose()
-  }
-
-  return $text | ConvertFrom-Json
-}
-
-function Get-SongFromWebDbHistory {
-  $rows = Invoke-WebDbQuery -Query "select playtime,id,jsonStr from historyTracks order by playtime desc limit 5;"
-  if (-not $rows -or $rows.Count -eq 0) {
-    return $null
-  }
-
-  foreach ($row in @($rows)) {
-    $song = Convert-WebDbRowToSong -Row $row
-    if ($song -and $song.id) {
-      $song.sourceFile = "Library\webdb.dat:historyTracks"
-      $song.sourceTimeMs = [int64]$row.playtime
-      $song.sourceFileTime = ([DateTimeOffset]::FromUnixTimeMilliseconds([int64]$row.playtime).LocalDateTime.ToString("s"))
-      return $song
-    }
-  }
-
-  return $null
-}
-
-function Get-SongFromWebDbPlayingCount {
-  $rows = Invoke-WebDbQuery -Query "select updateTime,resourceId from playingCount order by updateTime desc limit 5;"
-  if (-not $rows -or $rows.Count -eq 0) {
-    return $null
-  }
-
-  foreach ($row in @($rows)) {
-    $songId = [string]$row.resourceId
-    if (-not $songId) {
-      continue
-    }
-
-    $trackRows = Invoke-WebDbQuery -Query ("select 0 as playtime,id,jsonStr from dbTrack where id='{0}' limit 1;" -f ($songId -replace "'", "''"))
-    if ($trackRows -and $trackRows.Count -gt 0) {
-      $song = Convert-WebDbRowToSong -Row @($trackRows)[0]
-      if ($song -and $song.id) {
-        $song.sourceFile = "Library\webdb.dat:playingCount"
-        $song.sourceTimeMs = [int64]$row.updateTime
-        $song.sourceFileTime = ([DateTimeOffset]::FromUnixTimeMilliseconds([int64]$row.updateTime).LocalDateTime.ToString("s"))
-        return $song
-      }
-    }
-  }
-
-  return $null
-}
-
-function Get-SongFromPlayingListById {
-  param([string]$SongId)
-
-  if (-not (Test-Path -LiteralPath $PlayingListPath)) {
-    return $null
-  }
-
-  try {
-    $playing = Get-Content -LiteralPath $PlayingListPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $item = $playing.list | Where-Object { $_.track -and [string]$_.track.id -eq $SongId } | Select-Object -First 1
-    if ($item) {
-      return Convert-TrackToSong -Track $item.track
-    }
-  } catch {
-    return $null
-  }
-
-  return $null
-}
-
-function Get-SongFromPlayingListMarker {
-  if (-not (Test-Path -LiteralPath $PlayingListPath)) {
-    return $null
-  }
-
-  try {
-    $playing = Get-Content -LiteralPath $PlayingListPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    $played = @($playing.list | Where-Object { $_.track -and $_.isPlayedOnce -eq $true })
-    if ($played.Count -eq 1) {
-      $item = $played[0]
-    } elseif ($played.Count -gt 1) {
-      $item = $played | Sort-Object displayOrder | Select-Object -Last 1
-    } else {
-      return $null
-    }
-    if (-not $item) {
-      return $null
-    }
-    return Convert-TrackToSong -Track $item.track
-  } catch {
-    return $null
   }
 }
 
@@ -449,143 +256,6 @@ function Get-SongFromCdp {
   }
 }
 
-function Get-SongFromAudioCache {
-  if (-not (Test-Path -LiteralPath $CacheDir)) {
-    return $null
-  }
-
-  $recent = Get-ChildItem -LiteralPath $CacheDir -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^(\d+)-\d+-[a-f0-9]+\.uc$' -and $_.LastWriteTime -gt (Get-Date).AddMinutes(-30) } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 5
-
-  foreach ($file in $recent) {
-    if ($file.Name -match '^(\d+)-') {
-      $songId = $Matches[1]
-      $song = Get-SongFromPlayingListById -SongId $songId
-      if (-not $song) {
-        $song = Get-SongFromApi -SongId $songId
-      }
-      if ($song) {
-        $song.sourceFile = $file.Name
-        $song.sourceTimeMs = [DateTimeOffset]::new($file.LastWriteTime).ToUnixTimeMilliseconds()
-        $song.sourceFileTime = $file.LastWriteTime.ToString("s")
-        $song.sourceSize = $file.Length
-        return $song
-      }
-    }
-  }
-
-  return $null
-}
-
-function Get-SongFromRecentIndexCache {
-  if (-not (Test-Path -LiteralPath $CacheDir)) {
-    return $null
-  }
-
-  $recent = Get-ChildItem -LiteralPath $CacheDir -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match '^(\d+)-\d+-[a-f0-9]+\.(idx|info)$' -and $_.LastWriteTime -gt (Get-Date).AddMinutes(-10) } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 8
-
-  foreach ($file in $recent) {
-    if ($file.Name -match '^(\d+)-') {
-      $songId = $Matches[1]
-      $song = Get-SongFromPlayingListById -SongId $songId
-      if (-not $song) {
-        $song = Get-SongFromApi -SongId $songId
-      }
-      if ($song) {
-        $song.sourceFile = $file.Name
-        $song.sourceTimeMs = [DateTimeOffset]::new($file.LastWriteTime).ToUnixTimeMilliseconds()
-        $song.sourceFileTime = $file.LastWriteTime.ToString("s")
-        $song.sourceSize = $file.Length
-        return $song
-      }
-    }
-  }
-
-  return $null
-}
-
-function Test-WeakSource {
-  param([string]$Source)
-  return $Source -and $Source -ne "netease-cdp"
-}
-
-function Resolve-StableSong {
-  param(
-    $Song,
-    [string]$Source
-  )
-
-  if (-not $Song -or -not $Song.id) {
-    return $null
-  }
-
-  if (-not (Test-WeakSource -Source $Source)) {
-    $script:PendingWeakSongId = ""
-    $script:PendingWeakSource = ""
-    $script:PendingWeakCount = 0
-    return $Song
-  }
-
-  if (-not $script:LastAcceptedPayload -or -not $script:LastAcceptedPayload.id) {
-    $script:PendingWeakSongId = ""
-    $script:PendingWeakSource = ""
-    $script:PendingWeakCount = 0
-    return $Song
-  }
-
-  if ([string]$script:LastAcceptedPayload.id -eq [string]$Song.id) {
-    $script:PendingWeakSongId = ""
-    $script:PendingWeakSource = ""
-    $script:PendingWeakCount = 0
-    return $Song
-  }
-
-  if ($script:PendingWeakSongId -eq [string]$Song.id -and $script:PendingWeakSource -eq $Source) {
-    $script:PendingWeakCount += 1
-  } else {
-    $script:PendingWeakSongId = [string]$Song.id
-    $script:PendingWeakSource = $Source
-    $script:PendingWeakCount = 1
-  }
-
-  if ($script:PendingWeakCount -lt 3) {
-    Write-StateLog ("hold weak source change candidate id={0} source={1} count={2}; keeping id={3} source={4}" -f $Song.id, $Source, $script:PendingWeakCount, $script:LastAcceptedPayload.id, $script:LastAcceptedPayload.source)
-    return $null
-  }
-
-  Write-StateLog ("accept weak source change id={0} source={1} after {2} confirmations" -f $Song.id, $Source, $script:PendingWeakCount)
-  $script:PendingWeakSongId = ""
-  $script:PendingWeakSource = ""
-  $script:PendingWeakCount = 0
-  return $Song
-}
-
-function Get-SongFromApi {
-  param([string]$SongId)
-
-  $url = "https://music.163.com/api/song/detail/?ids=[$SongId]"
-  $response = Invoke-Utf8Json -Url $url
-
-  if (-not $response.songs -or $response.songs.Count -eq 0) {
-    return $null
-  }
-
-  $song = $response.songs[0]
-  return [ordered]@{
-    id = [string]$song.id
-    title = [string]$song.name
-    artist = [string](($song.artists | ForEach-Object { $_.name }) -join ", ")
-    album = [string]$song.album.name
-    coverUrl = [string]$song.album.picUrl
-    durationSeconds = [math]::Round(([double]$song.duration) / 1000, 3)
-  }
-}
-
 function Save-Cover {
   param(
     [string]$CoverUrl,
@@ -611,6 +281,7 @@ function Save-Cover {
 
   $tempCover = Join-Path $RuntimeDir ("cover-{0}.jpg" -f ([guid]::NewGuid().ToString("N")))
   try {
+    Write-Heartbeat -Status "working" -Title $SongId -Source "netease-cdp" -Message "Downloading cover."
     Invoke-WebRequest -Uri $coverWithSize -OutFile $tempCover -Headers @{
       "User-Agent" = "Mozilla/5.0"
       "Referer" = "https://music.163.com/"
@@ -633,62 +304,42 @@ function Save-Cover {
   }
 }
 
+function Write-DegradedOrWaiting {
+  param([string]$Reason)
+
+  if ($script:LastAcceptedPayload -and $script:LastAcceptedPayload.id -and $script:LastReliableAt -ne [DateTimeOffset]::MinValue) {
+    $ageSeconds = ([DateTimeOffset]::Now - $script:LastReliableAt).TotalSeconds
+    if ($ageSeconds -le $ReliableHoldSeconds) {
+      $script:PayloadSequence += 1
+      $payload = $script:LastAcceptedPayload | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+      Set-PayloadProperty -Payload $payload -Name "updatedAt" -Value ([DateTimeOffset]::Now.ToUnixTimeMilliseconds())
+      Set-PayloadProperty -Payload $payload -Name "sequence" -Value $script:PayloadSequence
+      Set-PayloadProperty -Payload $payload -Name "confidence" -Value "high"
+      Set-PayloadProperty -Payload $payload -Name "degraded" -Value $true
+      Set-PayloadProperty -Payload $payload -Name "reason" -Value $Reason
+      $script:LastAcceptedPayload = $payload
+      Write-Payload -Payload $payload
+      Write-Heartbeat -Status "degraded" -Title $payload.title -Source $payload.source -Message $Reason
+      return
+    }
+  }
+
+  Write-EmptyPayload -Reason $Reason
+}
+
 function Update-NowPlaying {
+  Write-Heartbeat -Status "checking" -Message "Reading current NetEase track from CDP."
   $song = Get-SongFromCdp
-  if ($song) {
-    $source = "netease-cdp"
-  }
-
   if (-not $song) {
-    $song = Get-SongFromAudioCache
-    if ($song) {
-      $source = "netease-cache-audio"
-    }
-  }
-
-  if (-not $song) {
-    $song = Get-SongFromWebDbHistory
-    if ($song) {
-      $source = "netease-webdb-history"
-    }
-  }
-
-  if (-not $song) {
-    $song = Get-SongFromWebDbPlayingCount
-    if ($song) {
-      $source = "netease-webdb-playingCount"
-    }
-  }
-
-  if (-not $song) {
-    $song = Get-SongFromPlayingListMarker
-    if ($song) {
-      $source = "netease-playingList-isPlayedOnce"
-    }
-  }
-
-  if (-not $song) {
-    $song = Get-SongFromRecentIndexCache
-    if ($song) {
-      $source = "netease-cache-index-fallback"
-    }
-  }
-  if (-not $song) {
-    Write-EmptyPayload -Reason "No current item found in NetEase webdb, cache, or playingList. Need LevelDB playingInfo decoding."
+    Write-DegradedOrWaiting -Reason "NetEase CDP is unavailable; refusing unreliable cache and history fallbacks."
     return
   }
 
-  $stableSong = Resolve-StableSong -Song $song -Source $source
-  if (-not $stableSong) {
-    if ($script:LastAcceptedPayload) {
-      Write-Payload -Payload $script:LastAcceptedPayload
-      Write-Heartbeat -Status "running" -Title $script:LastAcceptedPayload.title -Source $script:LastAcceptedPayload.source -Message ("Holding unstable {0}" -f $source)
-    }
-    return
-  }
-  $song = $stableSong
-
+  $source = "netease-cdp"
+  $nowMs = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+  $script:LastReliableAt = [DateTimeOffset]::FromUnixTimeMilliseconds($nowMs)
   $cover = Save-Cover -CoverUrl $song.coverUrl -SongId $song.id
+  $script:PayloadSequence += 1
   $payload = [ordered]@{
     id = $song.id
     title = $song.title
@@ -699,6 +350,10 @@ function Update-NowPlaying {
     durationSeconds = $song.durationSeconds
     playback = if ($song.playback) { $song.playback } else { "playing" }
     source = $source
+    confidence = "high"
+    degraded = $false
+    reliableAt = $nowMs
+    sequence = $script:PayloadSequence
     sourceFile = $song.sourceFile
     sourceFileTime = $song.sourceFileTime
     sourceSize = $song.sourceSize
@@ -717,14 +372,15 @@ function Update-NowPlaying {
   }
 }
 
+Initialize-LastReliablePayload
+
 try {
   do {
     try {
       Update-NowPlaying
     } catch {
       $message = $_.Exception.Message
-      Write-EmptyPayload -Reason $message
-      Write-Heartbeat -Status "error" -Message $message
+      Write-DegradedOrWaiting -Reason $message
       Write-StateLog ("error: {0}" -f $message)
       Write-Warning $message
     }

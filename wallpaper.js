@@ -28,6 +28,8 @@ const state = {
   mediaEnabled: true,
   playback: "waiting",
   bridgeUpdatedAt: 0,
+  bridgeSequence: 0,
+  bridgeConfidence: 0,
   bridgeSongId: "",
   bridgeLastSeenAt: 0,
   title: "",
@@ -208,13 +210,27 @@ function applyBridgePayload(payload) {
     return;
   }
   const updatedAt = Number(payload.updatedAt) || Date.now();
+  const sequence = Number(payload.sequence) || 0;
   const nextSongId = payload.id ? String(payload.id) : "";
-  if (updatedAt <= state.bridgeUpdatedAt && nextSongId === state.bridgeSongId) {
+  const confidenceLevels = { none: 0, low: 1, medium: 2, high: 3 };
+  const declaredConfidence = confidenceLevels[payload.confidence] || 0;
+  const nextConfidence = nextSongId === state.bridgeSongId
+    ? Math.max(declaredConfidence, state.bridgeConfidence)
+    : declaredConfidence;
+  if (sequence > 0 && state.bridgeSequence > 0 && sequence <= state.bridgeSequence) {
+    return;
+  }
+  if (updatedAt <= state.bridgeUpdatedAt) {
+    return;
+  }
+  if (nextSongId && nextSongId !== state.bridgeSongId && nextConfidence < state.bridgeConfidence) {
     return;
   }
 
   if (!nextSongId) {
     state.bridgeUpdatedAt = updatedAt;
+    state.bridgeSequence = sequence;
+    state.bridgeConfidence = nextConfidence;
     state.bridgeLastSeenAt = Date.now();
     state.bridgeSongId = "";
     state.playback = payload.playback || "waiting";
@@ -235,6 +251,8 @@ function applyBridgePayload(payload) {
 
   const previousSongId = state.bridgeSongId;
   state.bridgeUpdatedAt = updatedAt;
+  state.bridgeSequence = sequence;
+  state.bridgeConfidence = nextConfidence;
   state.bridgeLastSeenAt = Date.now();
   state.bridgeSongId = nextSongId;
   state.title = payload.title || payload.name || state.title;

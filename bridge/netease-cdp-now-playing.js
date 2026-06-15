@@ -193,7 +193,13 @@ async function main() {
   process.stdout.write(json);
 }
 
-main().catch((error) => {
+Promise.race([
+  main(),
+  new Promise((_, reject) => {
+    const timer = setTimeout(() => reject(new Error("CDP helper timed out")), 5000);
+    timer.unref();
+  }),
+]).catch((error) => {
   process.stderr.write(error.message || String(error));
   process.exit(1);
 });

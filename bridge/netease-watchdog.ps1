@@ -1,7 +1,10 @@
 param(
   [int]$BridgeIntervalSeconds = 3,
   [int]$CheckIntervalSeconds = 6,
-  [int]$StaleSeconds = 15
+  [int]$StaleSeconds = 60,
+  [int]$CdpCheckIntervalSeconds = 30,
+  [int]$CdpFailureThreshold = 3,
+  [int]$CdpRecoveryCooldownMinutes = 10
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +12,7 @@ $ErrorActionPreference = "Stop"
 
 $BridgeScript = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "netease-bridge.ps1"
 $RuntimeServerScript = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "netease-runtime-server.js"
+$EnsureCdpScript = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) "ensure-netease-cdp.ps1"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $WallpaperEngineDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $ProjectRoot))
 $WallpaperEngineConfig = Join-Path $WallpaperEngineDir "config.json"
@@ -18,6 +22,9 @@ $WatchdogLog = Join-Path $RuntimeDir "bridge-watchdog.log"
 $Heartbeat = Join-Path $RuntimeDir "bridge-heartbeat.json"
 $PidPath = Join-Path $RuntimeDir "bridge.pid"
 $LastWallpaperEngineRestart = [DateTime]::MinValue
+$LastCdpCheck = [DateTime]::MinValue
+$LastCdpRecovery = [DateTime]::MinValue
+$CdpFailureCount = 0
 
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 
@@ -57,6 +64,18 @@ function Get-BridgeProcesses {
   }
 }
 
+function Get-ProcessId {
+  param($Process)
+
+  if ($null -ne $Process.ProcessId) {
+    return [int]$Process.ProcessId
+  }
+  if ($null -ne $Process.Id) {
+    return [int]$Process.Id
+  }
+  return 0
+}
+
 function Get-RuntimeServerProcesses {
   try {
     return @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction Stop | Where-Object {
@@ -66,6 +85,61 @@ function Get-RuntimeServerProcesses {
     Write-WatchdogLog ("runtime server scan failed: {0}" -f $_.Exception.Message)
     return @()
   }
+}
+
+function Test-CdpPort {
+  try {
+    $response = Invoke-WebRequest -Uri "http://127.0.0.1:9222/json/version" -UseBasicParsing -TimeoutSec 2
+    return $response.StatusCode -eq 200
+  } catch {
+    return $false
+  }
+}
+
+function Test-NeteaseRunning {
+  return @(Get-Process -Name cloudmusic -ErrorAction SilentlyContinue).Count -gt 0
+}
+
+function Repair-CdpIfNeeded {
+  $now = Get-Date
+  if (($now - $script:LastCdpCheck).TotalSeconds -lt $CdpCheckIntervalSeconds) {
+    return
+  }
+  $script:LastCdpCheck = $now
+
+  if (Test-CdpPort) {
+    if ($script:CdpFailureCount -gt 0) {
+      Write-WatchdogLog "CDP recovered"
+    }
+    $script:CdpFailureCount = 0
+    return
+  }
+
+  if (-not (Test-NeteaseRunning)) {
+    $script:CdpFailureCount = 0
+    return
+  }
+
+  $script:CdpFailureCount += 1
+  Write-WatchdogLog "CDP unavailable while NetEase is running; failure=$($script:CdpFailureCount)/$CdpFailureThreshold"
+  if ($script:CdpFailureCount -lt $CdpFailureThreshold) {
+    return
+  }
+  if (($now - $script:LastCdpRecovery).TotalMinutes -lt $CdpRecoveryCooldownMinutes) {
+    Write-WatchdogLog "CDP recovery skipped; cooldown active"
+    return
+  }
+  if (-not (Test-Path -LiteralPath $EnsureCdpScript)) {
+    Write-WatchdogLog "CDP recovery script missing"
+    return
+  }
+
+  $args = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $EnsureCdpScript + '" -RestartIfNeeded'
+  Write-WatchdogLog "starting CDP recovery"
+  $recovery = Start-Process -FilePath "powershell.exe" -ArgumentList $args -WindowStyle Hidden -Wait -PassThru
+  $script:LastCdpRecovery = $now
+  $script:CdpFailureCount = 0
+  Write-WatchdogLog "CDP recovery finished exitCode=$($recovery.ExitCode)"
 }
 
 function Get-HeartbeatAgeSeconds {
@@ -239,6 +313,7 @@ try {
       $wallpaperConfigChanged = Repair-WallpaperEngineConfig
       $projectAudioConfigChanged = Repair-ProjectAudioConfig
       Restart-WallpaperEngineIfNeeded -ConfigChanged ($wallpaperConfigChanged -or $projectAudioConfigChanged)
+      Repair-CdpIfNeeded
 
       $servers = Get-RuntimeServerProcesses
       $bridges = Get-BridgeProcesses
@@ -255,7 +330,10 @@ try {
       } elseif ($age -gt $StaleSeconds) {
         Write-WatchdogLog "bridge stale; heartbeatAge=$age; stopping $($bridges.Count) process(es)"
         foreach ($bridge in $bridges) {
-          Stop-Process -Id $bridge.ProcessId -Force -ErrorAction SilentlyContinue
+          $bridgePid = Get-ProcessId -Process $bridge
+          if ($bridgePid -gt 0) {
+            Stop-Process -Id $bridgePid -Force -ErrorAction SilentlyContinue
+          }
         }
         Start-Sleep -Seconds 1
         Start-Bridge
