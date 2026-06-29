@@ -73,9 +73,6 @@ const state = {
   activeBackdropIndex: 0,
   coverPaletteToken: 0,
   coverPaletteSrc: "",
-  documentVisible: document.visibilityState !== "hidden",
-  wallpaperPaused: false,
-  windowFocused: true,
   animationFrameId: 0,
   animationTimerId: 0,
   lastRenderedAt: 0,
@@ -99,30 +96,15 @@ let mockPhase = 0;
 const rootStyle = document.documentElement.style;
 const rootVarCache = new Map();
 const ACTIVE_FRAME_INTERVAL = 1000 / 45;
-const LOW_POWER_FRAME_INTERVAL = 1000 / 12;
 const ACTIVE_BRIDGE_POLL_INTERVAL = 2000;
-const LOW_POWER_BRIDGE_POLL_INTERVAL = 15000;
-const SUSPENDED_BRIDGE_POLL_INTERVAL = 30000;
 const ACTIVE_STATUS_INTERVAL = 1000;
-const LOW_POWER_STATUS_INTERVAL = 10000;
-
-function isSuspended() {
-  return state.wallpaperPaused || !state.documentVisible;
-}
-
-function isLowPower() {
-  return isSuspended() || !state.windowFocused;
-}
 
 function currentBridgePollInterval() {
-  if (isSuspended()) {
-    return SUSPENDED_BRIDGE_POLL_INTERVAL;
-  }
-  return isLowPower() ? LOW_POWER_BRIDGE_POLL_INTERVAL : ACTIVE_BRIDGE_POLL_INTERVAL;
+  return ACTIVE_BRIDGE_POLL_INTERVAL;
 }
 
 function currentStatusInterval() {
-  return isLowPower() ? LOW_POWER_STATUS_INTERVAL : ACTIVE_STATUS_INTERVAL;
+  return ACTIVE_STATUS_INTERVAL;
 }
 
 function scheduleTimer(name, callback, delay) {
@@ -148,10 +130,6 @@ function stopAnimation() {
 }
 
 function scheduleAnimation(delay = 0) {
-  if (isSuspended()) {
-    stopAnimation();
-    return;
-  }
   stopAnimation();
   if (delay > 0) {
     state.animationTimerId = window.setTimeout(() => {
@@ -563,9 +541,8 @@ function updateMediaText() {
   }[state.playback] || "等待媒体信息";
   els.status.textContent = state.mockMode ? `${label} · 浏览器预览` : label;
   els.body.classList.toggle("has-media", Boolean(state.title || state.artist || state.albumTitle || state.hasCover));
-  els.body.classList.toggle("is-wallpaper-suspended", isSuspended());
-  els.body.classList.toggle("is-low-power", isLowPower());
-  els.body.dataset.powerState = isSuspended() ? "suspended" : (isLowPower() ? "low-power" : "active");
+  els.body.classList.remove("is-wallpaper-suspended", "is-low-power");
+  els.body.dataset.powerState = "active";
   els.body.dataset.animationState = state.animationFrameId || state.animationTimerId ? "scheduled" : "idle";
   const source = state.bridgeSongId ? "桥接" : "媒体";
   const seen = state.bridgeUpdatedAt ? ` ${formatClockTime(new Date(state.bridgeUpdatedAt))}` : "";
@@ -786,12 +763,7 @@ function roundRect(context, x, y, width, height, radius) {
 
 function animate(ts) {
   state.animationFrameId = 0;
-  if (isSuspended()) {
-    stopAnimation();
-    return;
-  }
-
-  const frameInterval = isLowPower() ? LOW_POWER_FRAME_INTERVAL : ACTIVE_FRAME_INTERVAL;
+  const frameInterval = ACTIVE_FRAME_INTERVAL;
   if (state.lastRenderedAt && ts - state.lastRenderedAt < frameInterval) {
     scheduleAnimation(frameInterval - (ts - state.lastRenderedAt));
     return;
@@ -803,7 +775,7 @@ function animate(ts) {
   const dt = Math.min(48, ts - lastFrame || 16);
   lastFrame = ts;
 
-  if (!isLowPower() && (state.mockMode || state.syntheticAudio)) {
+  if (state.mockMode || state.syntheticAudio) {
     generateMockAudio(dt);
   }
 
@@ -847,7 +819,7 @@ function animate(ts) {
     updateTimeline();
   }
 
-  scheduleAnimation(isLowPower() ? LOW_POWER_FRAME_INTERVAL : 0);
+  scheduleAnimation(0);
 }
 
 function generateMockAudio(dt) {
@@ -1000,14 +972,6 @@ function updateAudioHealth() {
     return;
   }
 
-  if (isLowPower()) {
-    state.syntheticAudio = false;
-    if (!state.audioListenerRegistered) {
-      els.audioProbe.textContent = state.audioUnavailable ? "éŸ³é¢‘: WEæŽ¥å£ç¼ºå¤±" : "éŸ³é¢‘: ç­‰å¾…WEæŽ¥å£";
-    }
-    return;
-  }
-
   const now = Date.now();
   const hasRealAudio = state.lastAudioAt > 0 && now - state.lastAudioAt < 5000;
   if (hasRealAudio) {
@@ -1053,40 +1017,6 @@ function updateAudioHealth() {
   }
 }
 
-function setWallpaperActivity(next = {}) {
-  const wasSuspended = isSuspended();
-  if (typeof next.documentVisible === "boolean") {
-    state.documentVisible = next.documentVisible;
-  }
-  if (typeof next.wallpaperPaused === "boolean") {
-    state.wallpaperPaused = next.wallpaperPaused;
-  }
-  if (typeof next.windowFocused === "boolean") {
-    state.windowFocused = next.windowFocused;
-  }
-
-  const suspended = isSuspended();
-  state.syntheticAudio = state.syntheticAudio && !isLowPower();
-
-  if (suspended) {
-    stopAnimation();
-  } else if (wasSuspended) {
-    lastFrame = 0;
-    state.lastRenderedAt = 0;
-    loadBridgePayload();
-    scheduleAnimation(0);
-  } else {
-    scheduleAnimation(isLowPower() ? LOW_POWER_FRAME_INTERVAL : 0);
-  }
-
-  updateMediaText();
-  updatePlaybackClass();
-  scheduleBridgePoll(250);
-  scheduleClockTick(250);
-  scheduleMediaTextUpdate(250);
-  scheduleAudioHealthUpdate(250);
-}
-
 function scheduleBridgePoll(delay = currentBridgePollInterval()) {
   scheduleTimer("bridgePoll", () => {
     state.lastBridgePollAt = Date.now();
@@ -1107,10 +1037,6 @@ function scheduleMediaTextUpdate(delay = currentStatusInterval()) {
   scheduleTimer("media", () => {
     state.lastMediaUpdateAt = Date.now();
     updateMediaText();
-    if (state.playback === "playing" && state.hasTimeline && state.duration > 0 && isLowPower()) {
-      state.position = Math.min(state.duration, state.position + currentStatusInterval() / 1000);
-      updateTimeline();
-    }
     scheduleMediaTextUpdate();
   }, delay);
 }
@@ -1124,10 +1050,6 @@ function scheduleAudioHealthUpdate(delay = currentStatusInterval()) {
 }
 
 window.wallpaperPropertyListener = {
-  setPaused(paused) {
-    setWallpaperActivity({ wallpaperPaused: Boolean(paused) });
-  },
-
   applyUserProperties(properties) {
     if (properties.schemecolor) {
       const values = properties.schemecolor.value.split(" ").map((v) => Math.ceil(Number(v) * 255));
@@ -1165,18 +1087,6 @@ window.wallpaperPropertyListener = {
 
 window.addEventListener("netease-now-playing", (event) => {
   applyBridgePayload(event.detail);
-});
-
-document.addEventListener("visibilitychange", () => {
-  setWallpaperActivity({ documentVisible: document.visibilityState !== "hidden" });
-});
-
-window.addEventListener("focus", () => {
-  setWallpaperActivity({ windowFocused: true });
-});
-
-window.addEventListener("blur", () => {
-  setWallpaperActivity({ windowFocused: false });
 });
 
 function setSidebarOpen(open) {
@@ -1273,9 +1183,7 @@ registerWallpaperEngine();
 window.addEventListener("resize", resizeAll);
 state.mockTimerId = window.setTimeout(() => {
   state.mockTimerId = 0;
-  if (!isLowPower()) {
-    startMockMode();
-  }
+  startMockMode();
 }, 900);
 loadBridgePayload();
 scheduleBridgePoll(ACTIVE_BRIDGE_POLL_INTERVAL);
